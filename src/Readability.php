@@ -100,6 +100,16 @@ class Readability implements LoggerAwareInterface
         'hasContent' => '/\S$/',
     ];
     public $defaultTagsToScore = ['section','h2','h3','h4','h5','h6','p','td','pre'];
+    // The commented out elements qualify as phrasing content but tend to be
+    // removed by readability when put into paragraphs, so we ignore them here.
+    public $phrasingElements = [
+        // "CANVAS", "IFRAME", "SVG", "VIDEO",
+        "ABBR", "AUDIO", "B", "BDO", "BR", "BUTTON", "CITE", "CODE", "DATA",
+        "DATALIST", "DFN", "EM", "EMBED", "I", "IMG", "INPUT", "KBD", "LABEL",
+        "MARK", "MATH", "METER", "NOSCRIPT", "OBJECT", "OUTPUT", "PROGRESS", "Q",
+        "RUBY", "SAMP", "SCRIPT", "SELECT", "SMALL", "SPAN", "STRONG", "SUB",
+        "SUP", "TEXTAREA", "TIME", "VAR", "WBR"
+    ];
     public $tidy_config = [
         'tidy-mark' => false,
         'vertical-space' => false,
@@ -675,6 +685,9 @@ class Readability implements LoggerAwareInterface
             $contentScore = ($node->hasAttribute('readability')) ? (int) $node->getAttribute('readability') : 0;
             $this->logger->debug('Start conditional cleaning of ' . $node->getNodePath() . ' (class=' . $node->getAttribute('class') . '; id=' . $node->getAttribute('id') . ')' . (($node->hasAttribute('readability')) ? (' with score ' . $node->getAttribute('readability')) : ''));
 
+            // XXX Incomplete implementation
+            $isList = in_array($node->tagName, ['ul', 'ol']);
+
             if ($weight + $contentScore < 0) {
                 $this->logger->debug('Removing...');
                 $node->parentNode->removeChild($node);
@@ -709,16 +722,16 @@ class Readability implements LoggerAwareInterface
                 $toRemove = false;
 
                 if ($this->lightClean) {
-                    if ($li > $p && 'ul' !== $tag && 'ol' !== $tag) {
+                    if (!$isList && $li > $p) {
                         $this->logger->debug(' too many <li> elements, and parent is not <ul> or <ol>');
                         $toRemove = true;
                     } elseif ($input > floor($p / 3)) {
                         $this->logger->debug(' too many <input> elements');
                         $toRemove = true;
-                    } elseif ($contentLength < 6 && (0 === $embedCount && (0 === $img || $img > 2))) {
+                    } elseif (!$isList && $contentLength < 6 && (0 === $embedCount && (0 === $img || $img > 2))) {
                         $this->logger->debug(' content length less than 6 chars, 0 embeds and either 0 images or more than 2 images');
                         $toRemove = true;
-                    } elseif ($weight < 25 && $linkDensity > 0.25) {
+                    } elseif (!$isList && $weight < 25 && $linkDensity > 0.25) {
                         $this->logger->debug(' weight is ' . $weight . ' < 25 and link density is ' . sprintf('%.2f', $linkDensity) . ' > 0.25');
                         $toRemove = true;
                     } elseif ($a > 2 && ($weight >= 25 && $linkDensity > 0.5)) {
@@ -732,16 +745,16 @@ class Readability implements LoggerAwareInterface
                     if ($img > $p) {
                         $this->logger->debug(' more image elements than paragraph elements');
                         $toRemove = true;
-                    } elseif ($li > $p && 'ul' !== $tag && 'ol' !== $tag) {
+                    } elseif (!$isList && $li > $p) {
                         $this->logger->debug('  too many <li> elements, and parent is not <ul> or <ol>');
                         $toRemove = true;
                     } elseif ($input > floor($p / 3)) {
                         $this->logger->debug('  too many <input> elements');
                         $toRemove = true;
-                    } elseif ($contentLength < 10 && (0 === $img || $img > 2)) {
+                    } elseif (!$isList && $contentLength < 10 && (0 === $img || $img > 2)) {
                         $this->logger->debug('  content length less than 10 chars and 0 images, or more than 2 images');
                         $toRemove = true;
-                    } elseif ($weight < 25 && $linkDensity > 0.2) {
+                    } elseif (!$isList && $weight < 25 && $linkDensity > 0.2) {
                         $this->logger->debug('  weight is ' . $weight . ' lower than 0 and link density is ' . sprintf('%.2f', $linkDensity) . ' > 0.2');
                         $toRemove = true;
                     } elseif ($weight >= 25 && $linkDensity > 0.5) {
@@ -1001,6 +1014,19 @@ class Readability implements LoggerAwareInterface
                 continue;
             }
 
+            // Remove unlikely candidates
+            $unlikelyMatchString = $node->getAttribute('class') . ' ' . $node->getAttribute('id') . ' ' . $node->getAttribute('style');
+
+            if (mb_strlen($unlikelyMatchString) > 3 && // don't process "empty" strings
+                preg_match($this->regexps['unlikelyCandidates'], $unlikelyMatchString) &&
+                !preg_match($this->regexps['okMaybeItsACandidate'], $unlikelyMatchString)
+            ) {
+                $this->logger->debug('Removing unlikely candidate (using conf) ' . $node->getNodePath() . ' by "' . $unlikelyMatchString . '"');
+                $node->parentNode->removeChild($node);
+                --$nodeIndex;
+                continue;
+            }
+
             // Some well known site uses sections as paragraphs.
             if (in_array($tagName, $this->defaultTagsToScore, true)) {
                 $nodesToScore[] = $node;
@@ -1036,7 +1062,7 @@ class Readability implements LoggerAwareInterface
                         }
 
                         if ($childNode instanceof \DOMText && '' === $this->getInnerText($childNode, true, true)) {
-                            $this->logger->debug('Remove empty text node');
+                            /* $this->logger->debug('Remove empty text node'); */
                             $childNode->parentNode->removeChild($childNode);
 
                             continue;
@@ -1062,6 +1088,7 @@ class Readability implements LoggerAwareInterface
                     if ($this->hasSingleTagInsideElement($node, 'p') && $this->getLinkDensity($node) < 0.25) {
                         $newNode = $node->childNodes->item(0);
                         $node->parentNode->replaceChild($newNode, $node);
+                        $nodesToScore[] = $newNode;
                     }
                 }
             }
@@ -1140,17 +1167,6 @@ class Readability implements LoggerAwareInterface
             for ($c = $candidates->length - 1; $c >= 0; --$c) {
                 $node = $candidates->item($c);
 
-                // Remove unlikely candidates
-                $unlikelyMatchString = $node->getAttribute('class') . ' ' . $node->getAttribute('id') . ' ' . $node->getAttribute('style');
-
-                if (mb_strlen($unlikelyMatchString) > 3 && // don't process "empty" strings
-                    preg_match($this->regexps['unlikelyCandidates'], $unlikelyMatchString) &&
-                    !preg_match($this->regexps['okMaybeItsACandidate'], $unlikelyMatchString)
-                ) {
-                    $this->logger->debug('Removing unlikely candidate (using conf) ' . $node->getNodePath() . ' by "' . $unlikelyMatchString . '" with readability ' . ($node->hasAttribute('readability') ? (int) $node->getAttributeNode('readability')->value : 0));
-                    $node->parentNode->removeChild($node);
-                    --$nodeIndex;
-                }
             }
             unset($candidates);
         }
@@ -1535,9 +1551,12 @@ class Readability implements LoggerAwareInterface
         return $ancestors;
     }
 
-    // XXX Incomplete implementation
     private function isPhrasingContent($node) {
-        return \XML_TEXT_NODE === $node->nodeType;
+        return \XML_TEXT_NODE === $node->nodeType
+            || in_array($node->nodeName, $this->phrasingElements, true)
+            || (in_array($node->nodeName, ['a','del','ins'], true) && !in_array(false, array_map(function($c){
+                return $this->isPhrasingContent($c);
+            }, iterator_to_array($node->childNodes))));
     }
 
     private function hasSingleTagInsideElement($node, $tag) {
